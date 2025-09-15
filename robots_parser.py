@@ -49,11 +49,11 @@ class RobotsHelper:
 
     def _extract_sitemaps(self):
         """Extract Sitemap URLs from robots.txt content"""
-        sitemaps = []
+        sitemaps = set()
         for line in self.robots_txt.splitlines():
             if line.lower().startswith("sitemap:"):
-                sitemaps.append(line.split(":", 1)[1].strip())
-        return sitemaps
+                sitemaps.add(line.split(":", 1)[1].strip())
+        return list(sitemaps)
 
     def can_fetch(self, url, agent=None):
         """Check if a URL is allowed for a given agent"""

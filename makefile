@@ -32,3 +32,7 @@ install-docker: update deps repo
 verify:
 	docker --version
 	docker compose version
+
+
+#playwright install
+#playwright install-deps
