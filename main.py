@@ -9,6 +9,7 @@ from usp.tree import sitemap_tree_for_homepage
 import html2text
 import pdb
 
+from hidden_links import get_all_links
 # ---------- config (keep params in code) ----------
 DOMAIN = "quill.co"
 LIMIT = 1000
@@ -199,59 +200,59 @@ async def collect_inline_click_urls(page) -> set[str]:
     )
     return {u for u in candidates or [] if u}
 
-async def drain_programmatic_nav(page) -> list[dict]:
-    """
-    Return and clear any logs captured by the injected nav hooks.
-    """
-    try:
-        logs = await page.evaluate("window.__NAV_LOGS__ ? window.__NAV_LOGS__.drain() : []")
-        return logs or []
-    except Exception:
-        return []
+# async def drain_programmatic_nav(page) -> list[dict]:
+#     """
+#     Return and clear any logs captured by the injected nav hooks.
+#     """
+#     try:
+#         logs = await page.evaluate("window.__NAV_LOGS__ ? window.__NAV_LOGS__.drain() : []")
+#         return logs or []
+#     except Exception:
+#         return []
 
-async def probe_click_only_links(page, domain: str, max_clicks: int, wait_ms: int) -> set[str]:
-    """
-    Try to discover SPA or JS-attached click navigations by:
-      - clicking likely-interactive elements
-      - capturing actual navigations (full or pushState)
-    """
-    # Candidate elements: links with void/empty hrefs, buttons, cards, onclick/data-href/url
-    handles = await page.query_selector_all(
-        "a[href='javascript:void(0)'], a[href='#'], a:not([href]), "
-        "[onclick], [data-href], [data-url], "
-        "[role='link'], [role='button'], button"
-    )
-    handles = handles[:max_clicks]
-    origin = page.url
-    discovered: set[str] = set()
+# async def probe_click_only_links(page, domain: str, max_clicks: int, wait_ms: int) -> set[str]:
+#     """
+#     Try to discover SPA or JS-attached click navigations by:
+#       - clicking likely-interactive elements
+#       - capturing actual navigations (full or pushState)
+#     """
+#     # Candidate elements: links with void/empty hrefs, buttons, cards, onclick/data-href/url
+#     handles = await page.query_selector_all(
+#         "a[href='javascript:void(0)'], a[href='#'], a:not([href]), "
+#         "[onclick], [data-href], [data-url], "
+#         "[role='link'], [role='button'], button"
+#     )
+#     handles = handles[:max_clicks]
+#     origin = page.url
+#     discovered: set[str] = set()
 
-    for el in handles:
-        try:
-            await el.scroll_into_view_if_needed(timeout=500)
-            await el.hover(timeout=500)
-            await el.click(timeout=500, force=True, no_wait_after=True)
-            # If full navigation happens, capture then go back
-            try:
-                await page.wait_for_navigation(timeout=wait_ms)
-                new_url = page.url
-                if new_url and new_url != origin and same_domain(new_url, domain):
-                    discovered.add(new_url)
-                await page.goto(origin, wait_until="domcontentloaded")
-            except PWTimeout:
-                pass
-        except Exception:
-            continue
+#     for el in handles:
+#         try:
+#             await el.scroll_into_view_if_needed(timeout=500)
+#             await el.hover(timeout=500)
+#             await el.click(timeout=500, force=True, no_wait_after=True)
+#             # If full navigation happens, capture then go back
+#             try:
+#                 await page.wait_for_navigation(timeout=wait_ms)
+#                 new_url = page.url
+#                 if new_url and new_url != origin and same_domain(new_url, domain):
+#                     discovered.add(new_url)
+#                 await page.goto(origin, wait_until="domcontentloaded")
+#             except PWTimeout:
+#                 pass
+#         except Exception:
+#             continue
 
-    # Pull SPA pushState/open captures
-    bucket = await drain_programmatic_nav(page)
-    for item in bucket:
-        u = item.get("url")
-        if isinstance(u, str) and u.startswith("http") and same_domain(u, domain):
-            discovered.add(u)
+#     # Pull SPA pushState/open captures
+#     bucket = await drain_programmatic_nav(page)
+#     for item in bucket:
+#         u = item.get("url")
+#         if isinstance(u, str) and u.startswith("http") and same_domain(u, domain):
+#             discovered.add(u)
     
-    pdb.set_trace()
+#     #pdb.set_trace()
 
-    return discovered
+#     return discovered
 
 # ---------- core page handler ----------
 async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list[str], results_lock: asyncio.Lock):
@@ -268,7 +269,7 @@ async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list
         # ---- gather content/meta
         markdown, meta = await extract_meta_and_markdown(page)
         parsed = urlparse(final_url)
-        first_seg = (parsed.path.split("/")[3] if parsed.path and parsed.path != "/" else "") or "website"
+        first_seg = (parsed.path.split("/")[1] if parsed.path and parsed.path != "/" else "") or "website"
         page_type = first_seg or meta.get("ogType") or "website"
         title = meta.get("ogTitle") or meta.get("titleTag") or ""
         canonical = meta.get("canonical") or final_url
@@ -290,14 +291,23 @@ async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list
         # ---- discover links
         static_links = await collect_static_links(page, domain)
         inline_click_urls = await collect_inline_click_urls(page)
-        click_only_urls = await probe_click_only_links(
-            page, domain=domain, max_clicks=MAX_CLICK_PROBES_PER_PAGE, wait_ms=CLICK_WAIT_MS
+        hidden_links = await get_all_links(
+            url=url,
+            max_clicks=120,
+            click_wait_ms=200,
+            same_domain_only=True,
+            headless=True,
+            scroll_steps=12
         )
 
-        all_found = static_links.union(inline_click_urls).union(click_only_urls)
+        # click_only_urls = await probe_click_only_links(
+        #     page, domain=domain, max_clicks=MAX_CLICK_PROBES_PER_PAGE, wait_ms=CLICK_WAIT_MS
+        # )
 
+        all_found = static_links.union(inline_click_urls).union(hidden_links)
+        
         if VERBOSE:
-            dbg(f"[links] static={len(static_links)} inline={len(inline_click_urls)} click_only={len(click_only_urls)} on {final_url}")
+            dbg(f"[links] static={len(static_links)} inline={len(inline_click_urls)} hidden_links={len(hidden_links)} on {final_url}")
 
         # Deduplicate, same-domain, and restrict to allowed prefixes for enqueueing
         filtered = {
@@ -374,8 +384,9 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
                     dbg(f"[worker {worker_id}] visiting: {url}")
 
                 final_url, links = await scrape_one_page(context, url, domain, allowed_prefixes, results_lock)
-
+                
                 # enqueue discovered links (already filtered to allowed prefixes)
+                
                 added = 0
                 for lnk in links:
                     async with visited_lock:
@@ -388,6 +399,7 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
 
                 if VERBOSE and added:
                     dbg(f"[worker {worker_id}] enqueued {added} new links from {final_url}")
+            
 
                 queue.task_done()
 
