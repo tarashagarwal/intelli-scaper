@@ -14,14 +14,15 @@ import time
 from playwright.async_api import Error as PWError
 # ---------- config (keep params in code) ----------
 DOMAIN = "interviewing.io"
+START_PATH = f"{DOMAIN}"
 LIMIT = 1000
-CONCURRENCY = 20
+CONCURRENCY = 50
 HEADLESS = True
 VERBOSE = True
 
 # Only URLs whose path starts with any of these prefixes will be crawled/saved.
 # Examples: ["/blog", "/blog/science"]. Leave [] to allow everything on the domain.
-ALLOWED_PATH_PREFIXES = ["/blog"]
+ALLOWED_PATH_PREFIXES = ["/mocks"]
 
 # Cap how many candidate elements we try to click per page when probing JS-only nav
 MAX_CLICK_PROBES_PER_PAGE = 30
@@ -160,7 +161,7 @@ def path_allowed(url: str, allowed_prefixes: list[str]) -> bool:
 
 def seed_urls_from_sitemap(domain: str, allowed_prefixes: list[str]) -> set[str]:
     """Seed with homepage and sitemap URLs filtered by ALLOWED_PATH_PREFIXES."""
-    seeds = {f"https://{domain}/"}  # always include homepage
+    seeds = {f"https://{START_PATH}/"}  # always include startpage
     try:
         tree = sitemap_tree_for_homepage(f"https://{domain}/")
         for p in tree.all_pages():
@@ -327,14 +328,15 @@ async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list
         # ---- store ONLY if path matches allowed prefixes
         if path_allowed(final_url, allowed_prefixes):
             async with results_lock:
-                RESULTS.append(
-                    {
+                result = {
                         "title": title,
                         "type": page_type,
                         "content": markdown,
                         "url": canonical,
                     }
-                )
+                if result not in RESULTS:
+                    RESULTS.append(result)
+
         if VERBOSE:
             dbg(f"[saved] {final_url}  (title='{title[:80]}', type='{page_type}')")
 
@@ -442,7 +444,7 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
                         for lnk in links:
                             if len(visited) >= limit:
                                 break
-                            if lnk not in visited and lnk not in enqueued:
+                            if lnk not in visited and lnk not in enqueued and path_allowed(u, allowed_prefixes):
                                 enqueued.add(lnk)
                                 to_add.append(lnk)
 
@@ -478,6 +480,20 @@ if __name__ == "__main__":
             allowed_prefixes=ALLOWED_PATH_PREFIXES,
         )
     )
+
+    seen = set()
+    unique = []
+    for item in RESULTS:
+        # Prefer source_url, fallback to url, else skip
+        key = item.get("source_url") or item.get("url")
+        if not key:   # if neither present, skip this item
+            continue
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    RESULTS = unique
+
     # Save JSON
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(RESULTS, f, ensure_ascii=False, indent=2)

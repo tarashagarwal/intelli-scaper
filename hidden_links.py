@@ -220,29 +220,31 @@ async def get_all_links(
             if not u:
                 return
             u = normalize_url(url, u)
-            if (not same_domain_only or same_domain(u, url)) and in_base_path(url, u):
+            if (not same_domain_only or same_domain(u, url)) and in_base_path(url, u) and u not in results:
                 results.add(u)
+                print(f"Adding New URL: {u}")
 
         page.on("request", lambda req: (req.is_navigation_request() and add_url(req.url)))
-        page.on("framenavigated", lambda fr: add_url(fr.url))
+   
+        #page.on("framenavigated", lambda fr: add_url(fr.url))
 
-        popups = []
-        async def on_popup(p2):
-            popups.append(p2)
-            try:
-                await p2.wait_for_load_state("domcontentloaded", timeout=4000)
-            except Exception:
-                pass
-            add_url(p2.url)
-            try:
-                await p2.close()
-            except Exception:
-                pass
-        page.on("popup", lambda p2: asyncio.create_task(on_popup(p2)))
+        # popups = []
+        # async def on_popup(p2):
+        #     popups.append(p2)
+        #     try:
+        #         await p2.wait_for_load_state("domcontentloaded", timeout=4000)
+        #     except Exception:
+        #         pass
+        #     add_url(p2.url)
+        #     try:
+        #         await p2.close()
+        #     except Exception:
+        #         pass
+        # page.on("popup", lambda p2: asyncio.create_task(on_popup(p2)))
 
         # Go & hook SPA nav
-        await page.add_init_script(HOOK_HISTORY_JS)
-        await page.goto(url, wait_until="networkidle")
+        #await page.add_init_script(HOOK_HISTORY_JS)
+        #await page.goto(url, wait_until="domcontentloaded", timeout=4000)
 
         # Auto-scroll to reveal lazy content so clickable elements mount
         await auto_scroll(page, max_steps=scroll_steps)
@@ -269,6 +271,7 @@ async def get_all_links(
 
     # keep only URLs that actually have a domain/hostname and are in-base-path
     results = {u for u in results if has_hostname(u) and in_base_path(url, u)}
+    results = list(set(results))
     return results
 
 # ------------- "main" with in-code params (no CLI) -------------
