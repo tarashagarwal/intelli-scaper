@@ -209,3 +209,4 @@ __marimo__/
 # Local
 myenv/
 output/
+crawl_output.json

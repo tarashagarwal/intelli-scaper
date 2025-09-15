@@ -363,45 +363,43 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
 
         async def worker(worker_id: int):
             while True:
+                url = await queue.get()  # <-- no timeout; stay alive
                 try:
-                    url = await asyncio.wait_for(queue.get(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    if queue.empty():
-                        return
-                    continue
-
-                # check limit / visited atomically
-                async with visited_lock:
-                    if len(visited) >= limit:
-                        queue.task_done()
-                        return
-                    if url in visited:
-                        queue.task_done()
-                        continue
-                    visited.add(url)
-
-                if VERBOSE:
-                    dbg(f"[worker {worker_id}] visiting: {url}")
-
-                final_url, links = await scrape_one_page(context, url, domain, allowed_prefixes, results_lock)
-                
-                # enqueue discovered links (already filtered to allowed prefixes)
-                
-                added = 0
-                for lnk in links:
+                    # check limit / visited atomically
+                    skip = False
                     async with visited_lock:
-                        if len(visited) >= limit:
-                            break
-                        if lnk not in visited and lnk not in enqueued:
-                            queue.put_nowait(lnk)
-                            enqueued.add(lnk)
-                            added += 1
+                        if len(visited) >= limit or url in visited:
+                            skip = True
+                        else:
+                            visited.add(url)
 
-                if VERBOSE and added:
-                    dbg(f"[worker {worker_id}] enqueued {added} new links from {final_url}")
-            
+                    if skip:
+                        if VERBOSE:
+                            dbg(f"[worker {worker_id}] skipping: {url}")
+                        continue
 
-                queue.task_done()
+                    if VERBOSE:
+                        dbg(f"[worker {worker_id}] visiting: {url}")
+
+                    final_url, links = await scrape_one_page(context, url, domain, allowed_prefixes, results_lock)
+
+                    # enqueue discovered links (already filtered to allowed prefixes)
+                    added = 0
+                    for lnk in links:
+                        async with visited_lock:
+                            if len(visited) >= limit:
+                                break
+                            if lnk not in visited and lnk not in enqueued:
+                                queue.put_nowait(lnk)
+                                enqueued.add(lnk)
+                                added += 1
+
+                    if VERBOSE and added:
+                        dbg(f"[worker {worker_id}] enqueued {added} new links from {final_url}")
+
+                finally:
+                    queue.task_done()
+
 
         workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
 
