@@ -10,10 +10,12 @@ import html2text
 import pdb
 
 from hidden_links import get_all_links
+import time
+from playwright.async_api import Error as PWError
 # ---------- config (keep params in code) ----------
-DOMAIN = "quill.co"
+DOMAIN = "interviewing.io"
 LIMIT = 1000
-CONCURRENCY = 10
+CONCURRENCY = 20
 HEADLESS = True
 VERBOSE = True
 
@@ -85,6 +87,51 @@ NAV_INJECT_JS = r"""
 """
 
 # ---------- helpers ----------
+
+
+NAV_DESTROYED_SIGNS = (
+    "Execution context was destroyed",
+    "Target closed",  # window closed during nav
+)
+
+async def wait_until_stable(page, idle_ms=400, timeout_ms=15000):
+    """Wait until the URL stops changing and the page is idle for a short period."""
+    deadline = time.time() + timeout_ms / 1000.0
+    last_url = page.url
+    while time.time() < deadline:
+        # wait for DOM to be ready/idle
+        try:
+            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        except PWTimeout:
+            # some sites never hit 'networkidle'; fall back to domcontentloaded
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            except PWTimeout:
+                pass
+        await asyncio.sleep(idle_ms / 1000.0)
+        if page.url == last_url:
+            return
+        last_url = page.url
+    # give up: return anyway
+
+async def safe_call(page, coro_factory, retries=3):
+    """Run a page operation with retries if a navigation destroys the context."""
+    last_err = None
+    for _ in range(retries):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            msg = str(e)
+            if any(s in msg for s in NAV_DESTROYED_SIGNS):
+                # navigation happened; wait for stability then retry
+                await wait_until_stable(page)
+                last_err = e
+                continue
+            raise
+    # still failing; bubble last error
+    raise last_err
+
+
 def dbg(msg: str):
     if VERBOSE:
         print(msg, flush=True)
@@ -152,53 +199,37 @@ async def extract_meta_and_markdown(page):
     return markdown, meta
 
 async def collect_static_links(page, domain: str) -> set[str]:
-    links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+    links = await safe_call(page, lambda: page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
+    static_links = {u for u in links if isinstance(u, str) and u.startswith("http") and same_domain(u, domain)}
     out = set()
-    for lnk in links or []:
+    for lnk in static_links or []:
         if isinstance(lnk, str) and lnk.startswith("http") and same_domain(lnk, domain):
             out.add(lnk)
     return out
 
 async def collect_inline_click_urls(page) -> set[str]:
-    """
-    Find URLs embedded in inline handlers or data-* attributes.
-    """
-    candidates = await page.evaluate(
-        """
-        () => {
-          const abs = (u) => {
-            try { return new URL(u, location.href).href } catch { return '' }
-          };
-          const found = new Set();
-
-          // data-href / data-url
-          document.querySelectorAll('[data-href],[data-url]').forEach(el => {
-            const u = el.getAttribute('data-href') || el.getAttribute('data-url');
-            if (u) found.add(abs(u));
-          });
-
-          // inline onclick attribute: pull http(s)://... or /path...
-          document.querySelectorAll('[onclick]').forEach(el => {
-            const s = el.getAttribute('onclick') || '';
-            const re = /(https?:\\/\\/[^'"\\s)]+|\\/[A-Za-z0-9_\\-\\/\\.?=&%#]+)/g;
-            let m;
-            while ((m = re.exec(s)) !== null) {
-              const u = abs(m[1]);
-              if (u) found.add(u);
-            }
-          });
-
-          // role/link-ish hints
-          document.querySelectorAll('[role="link"],[role="button"],[aria-label*="Read"],[aria-label*="Open"]').forEach(el => {
-            const u = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-url');
-            if (u) found.add(abs(u));
-          });
-
-          return Array.from(found);
-        }
-        """
-    )
-    return {u for u in candidates or [] if u}
+    inline_candidates = await safe_call(page, lambda: page.evaluate("""
+    () => {
+        const abs = (u) => { try { return new URL(u, location.href).href } catch { return '' } };
+        const found = new Set();
+        document.querySelectorAll('[data-href],[data-url]').forEach(el => {
+        const u = el.getAttribute('data-href') || el.getAttribute('data-url');
+        if (u) found.add(abs(u));
+        });
+        document.querySelectorAll('[onclick]').forEach(el => {
+        const s = el.getAttribute('onclick') || '';
+        const re = /(https?:\\/\\/[^'"\\s)]+|\\/[A-Za-z0-9_\\-\\/\\.?=&%#]+)/g;
+        let m; while ((m = re.exec(s)) !== null) { const u = abs(m[1]); if (u) found.add(u); }
+        });
+        document.querySelectorAll('[role="link"],[role="button"]').forEach(el => {
+        const u = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-url');
+        if (u) found.add(abs(u));
+        });
+        return Array.from(found);
+    }
+    """))
+    inline_click_urls = {u for u in inline_candidates if u}
+    return inline_click_urls
 
 # async def drain_programmatic_nav(page) -> list[dict]:
 #     """
@@ -256,18 +287,37 @@ async def collect_inline_click_urls(page) -> set[str]:
 
 # ---------- core page handler ----------
 async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list[str], results_lock: asyncio.Lock):
-    """
-    Loads 'url', waits for JS, extracts content, and discovers links (static + click-only).
-    Returns: (final_url, links_found_on_page within allowed prefixes)
-    Appends JSON record to RESULTS ONLY if URL path matches allowed prefixes (or prefixes empty).
-    """
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=60000)
-        final_url = page.url  # after redirects
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # let SPAs settle (they often pushState/redirect after DOMContentLoaded)
+        await wait_until_stable(page)
 
-        # ---- gather content/meta
-        markdown, meta = await extract_meta_and_markdown(page)
+        final_url = page.url
+
+        # ---- gather content/meta (with retry)
+        html = await safe_call(page, page.content)
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = False
+        markdown = h.handle(html)
+
+        meta = await safe_call(page, lambda: page.evaluate("""
+            () => {
+            const pick = (sel) => {
+                const el = document.querySelector(sel);
+                return el ? (el.getAttribute('content') ?? el.textContent ?? '').trim() : '';
+            };
+            const canon = document.querySelector('link[rel="canonical"]')?.href || '';
+            return {
+                ogTitle: pick('meta[property="og:title"]') || pick('meta[name="og:title"]'),
+                ogType:  pick('meta[property="og:type"]')  || pick('meta[name="og:type"]'),
+                titleTag: (document.title || '').trim(),
+                canonical: canon
+            };
+            }
+        """))
+
         parsed = urlparse(final_url)
         first_seg = (parsed.path.split("/")[1] if parsed.path and parsed.path != "/" else "") or "website"
         page_type = first_seg or meta.get("ogType") or "website"
@@ -363,42 +413,47 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
 
         async def worker(worker_id: int):
             while True:
-                url = await queue.get()  # <-- no timeout; stay alive
                 try:
-                    # check limit / visited atomically
-                    skip = False
-                    async with visited_lock:
-                        if len(visited) >= limit or url in visited:
-                            skip = True
-                        else:
-                            visited.add(url)
+                    url = await asyncio.wait_for(queue.get(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    if queue.empty():
+                        return
+                    continue
 
-                    if skip:
-                        if VERBOSE:
-                            dbg(f"[worker {worker_id}] skipping: {url}")
+                # limit/visited gate
+                async with visited_lock:
+                    if len(visited) >= limit:
+                        queue.task_done()
+                        return
+                    if url in visited:
+                        queue.task_done()
                         continue
+                    visited.add(url)
 
-                    if VERBOSE:
-                        dbg(f"[worker {worker_id}] visiting: {url}")
+                if VERBOSE:
+                    dbg(f"[worker {worker_id}] visiting: {url}")
 
-                    final_url, links = await scrape_one_page(context, url, domain, allowed_prefixes, results_lock)
+                final_url, links = await scrape_one_page(context, url, domain, allowed_prefixes, results_lock)
 
-                    # enqueue discovered links (already filtered to allowed prefixes)
-                    added = 0
-                    for lnk in links:
-                        async with visited_lock:
+                # >>> REPLACE your per-link lock loop with the batched version here <<<
+                to_add = []
+                async with visited_lock:
+                    if len(visited) < limit:
+                        for lnk in links:
                             if len(visited) >= limit:
                                 break
                             if lnk not in visited and lnk not in enqueued:
-                                queue.put_nowait(lnk)
                                 enqueued.add(lnk)
-                                added += 1
+                                to_add.append(lnk)
 
-                    if VERBOSE and added:
-                        dbg(f"[worker {worker_id}] enqueued {added} new links from {final_url}")
+                for lnk in to_add:
+                    queue.put_nowait(lnk)
 
-                finally:
-                    queue.task_done()
+                if VERBOSE and to_add:
+                    dbg(f"[worker {worker_id}] enqueued {len(to_add)} new links from {final_url}")
+
+                queue.task_done()
+
 
 
         workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]

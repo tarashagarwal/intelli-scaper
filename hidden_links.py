@@ -263,7 +263,7 @@ async def get_all_links(
             urls_found = {u for u in urls_found if in_base_path(url, u)}
             results |= urls_found
             clicks_done += 1
-            await page.wait_for_timeout(150)
+            await page.wait_for_timeout(1500)
 
         await browser.close()
 
