@@ -76,6 +76,16 @@ def _validate_domain(raw: str) -> str:
 def _start_job(cfg: CrawlerConfig):
     global _job_thread, _job_stop, _job_status
 
+    domain_folder = os.path.join(OUTPUT_ROOT, cfg.domain)
+    if os.path.isdir(domain_folder):
+        for fname in os.listdir(domain_folder):
+            fpath = os.path.join(domain_folder, fname)
+            try:
+                if os.path.isfile(fpath):
+                    os.remove(fpath)
+            except Exception as e:
+                log_line(f"[server] could not remove {fpath}: {e}")
+
     if _job_status["running"]:
         raise RuntimeError("A crawl is already running.")
 
@@ -150,10 +160,16 @@ def api_start():
         return jsonify({"ok": False, "error": str(e)}), 400
 
     def to_bool(v, default=False):
+        """
+        Convert checkbox/boolean inputs like 'on', 'off', 'true', 'false' to Python bool.
+        """
         if isinstance(v, bool):
             return v
         s = (str(v) if v is not None else "").strip().lower()
-        return {"1": True, "true": True, "on": True, "yes": True}.get(s, default)
+        return {
+            "1": True, "true": True, "on": True, "yes": True,
+            "0": False, "false": False, "off": False, "no": False,
+        }.get(s, default)
 
     allowed_prefixes = [s.strip() for s in (data.get("allowed_prefixes") or "").split(",") if s.strip()]
     # ensure prefixes start with '/'
@@ -173,12 +189,15 @@ def api_start():
         flush_every_seconds=float(data.get("flush_every_seconds", 10.0)),
     )
 
+    # print(f"**************************************{cfg.quick_mode}**************************************")
+
     try:
         _start_job(cfg)
         log_line(f"[server] started job for {cfg.domain} (limit={cfg.limit}, conc={cfg.concurrency}, quick_mode={cfg.quick_mode})")
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @APP.route("/api/stop", methods=["POST"])
 def api_stop():
