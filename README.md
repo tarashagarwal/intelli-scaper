@@ -3,6 +3,8 @@
 A lightweight, browser-controlled **web crawler** built with **Flask** and **Playwright**.  
 Start crawls, monitor live logs, and download results – all from a sleek Apple-like UI.  
 
+![App UI](https://github.com/user-attachments/assets/312e3b1b-c1aa-4097-ab48-2b40b68f06d1)
+
 ## ✨ Features
 - **Browser UI** – Start/stop crawls, configure options, and view real-time logs  
 - **Multi-Worker Engine** – Parallel Playwright workers for efficient crawling  
@@ -20,9 +22,6 @@ Results are stored in `output/<domain>/`:
 - `pages.ndjson` – newline-delimited JSON  
 - `pages.json` – rolling snapshot  
 
-# Web Crawler – Flask UI + REST API (port 5000)
-
-![App UI](https://github.com/user-attachments/assets/312e3b1b-c1aa-4097-ab48-2b40b68f06d1)
 
 A modular Playwright-based crawler wrapped in a Flask server with an “Apple-like” UI:
 
