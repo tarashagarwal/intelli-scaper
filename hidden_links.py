@@ -5,6 +5,10 @@ from urllib.parse import urlsplit, urlunsplit, urljoin
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
+# --------- timeouts (tweak as needed) ---------
+DEFAULT_NAV_TIMEOUT_MS = 15_000   # for page.goto / navigations
+DEFAULT_CTX_TIMEOUT_MS = 10_000   # for selectors, clicks, etc.
+
 # ------------- utils -------------
 def normalize_url(base: str, u: str) -> str:
     try:
@@ -42,7 +46,6 @@ def in_base_path(base_url: str, u: str) -> bool:
         if base_path == "/":
             return True  # no path restriction at root
         upath = urlsplit(u).path or "/"
-        # match same path or any sub-path
         if upath == base_path:
             return True
         prefix = base_path if base_path.endswith("/") else base_path + "/"
@@ -87,7 +90,6 @@ HOOK_HISTORY_JS = r"""
     });
   }
 
-  // Catch Turbo/Hotwire navigations if present
   document.addEventListener('turbo:visit', e => {
     try { if (e && e.detail && e.detail.url) window.__navs.push(new URL(e.detail.url, location.href).href); } catch {}
   }, true);
@@ -111,6 +113,26 @@ CSSPATH_JS = r"""
   return parts.join(' > ');
 })
 """
+
+# ------------- navigation helper -------------
+async def smart_goto(page, url: str, timeout_ms: int = DEFAULT_NAV_TIMEOUT_MS):
+    """
+    Try to reach DOMContentLoaded within timeout; if that never happens,
+    fall back to a lighter wait and continue.
+    """
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    except PWTimeout:
+        # Fallback: some sites never signal domcontentloaded reliably.
+        try:
+            await page.goto(url, wait_until="commit", timeout=max(3000, timeout_ms // 2))
+        except Exception:
+            pass
+        # Try to reach domcontentloaded briefly; ignore if it still doesn't happen.
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=max(2000, timeout_ms // 3))
+        except PWTimeout:
+            pass
 
 # ------------- core extraction -------------
 async def auto_scroll(page, max_steps=20, wait_ms=600):
@@ -166,7 +188,10 @@ async def click_probe(page, path, base_url, wait_ms, same_domain_only):
         except Exception:
             # Fallback: dispatch a JS click (bubbling)
             try:
-                await page.evaluate("(sel) => { const el = document.querySelector(sel); if (el) el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); }", path)
+                await page.evaluate(
+                    "(sel) => { const el = document.querySelector(sel); if (el) el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); }",
+                    path
+                )
             except Exception:
                 return out, navigated
 
@@ -213,9 +238,13 @@ async def get_all_links(
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
+        # Set sensible defaults globally
+        context.set_default_navigation_timeout(DEFAULT_NAV_TIMEOUT_MS)
+        context.set_default_timeout(DEFAULT_CTX_TIMEOUT_MS)
+
         page = await context.new_page()
 
-        # record navigations initiated by clicks (hard or SPA) and popups
+        # record navigations initiated by clicks (hard or SPA)
         def add_url(u: str):
             if not u:
                 return
@@ -225,26 +254,11 @@ async def get_all_links(
                 print(f"Adding New URL: {u}")
 
         page.on("request", lambda req: (req.is_navigation_request() and add_url(req.url)))
-   
-        #page.on("framenavigated", lambda fr: add_url(fr.url))
-
-        # popups = []
-        # async def on_popup(p2):
-        #     popups.append(p2)
-        #     try:
-        #         await p2.wait_for_load_state("domcontentloaded", timeout=4000)
-        #     except Exception:
-        #         pass
-        #     add_url(p2.url)
-        #     try:
-        #         await p2.close()
-        #     except Exception:
-        #         pass
-        # page.on("popup", lambda p2: asyncio.create_task(on_popup(p2)))
+        # page.on("framenavigated", lambda fr: add_url(fr.url))  # optional
 
         # Go & hook SPA nav
-        #await page.add_init_script(HOOK_HISTORY_JS)
-        #await page.goto(url, wait_until="domcontentloaded", timeout=4000)
+        await page.add_init_script(HOOK_HISTORY_JS)
+        await smart_goto(page, url, timeout_ms=DEFAULT_NAV_TIMEOUT_MS)
 
         # Auto-scroll to reveal lazy content so clickable elements mount
         await auto_scroll(page, max_steps=scroll_steps)
@@ -260,8 +274,7 @@ async def get_all_links(
             if path in seen_paths:
                 continue
             seen_paths.add(path)
-            urls_found, navigated = await click_probe(page, path, url, click_wait_ms, same_domain_only)
-            # also enforce path-scope here for safety
+            urls_found, _ = await click_probe(page, path, url, click_wait_ms, same_domain_only)
             urls_found = {u for u in urls_found if in_base_path(url, u)}
             results |= urls_found
             clicks_done += 1
@@ -271,15 +284,14 @@ async def get_all_links(
 
     # keep only URLs that actually have a domain/hostname and are in-base-path
     results = {u for u in results if has_hostname(u) and in_base_path(url, u)}
-    results = list(set(results))
-    return results
+    return sorted(results)
 
 # ------------- "main" with in-code params (no CLI) -------------
 async def _amain():
     # ---- tweak these defaults if you like ----
     url = "https://quill.co/blog"
     max_clicks = 120
-    click_wait_ms = 10
+    click_wait_ms = 300
     same_domain_only = True   # keep domain-limited
     headless = True           # set False to watch it work
     scroll_steps = 12
@@ -293,7 +305,7 @@ async def _amain():
         headless=headless,
         scroll_steps=scroll_steps,
     )
-    for u in sorted(links):
+    for u in links:
         print(u)
 
 if __name__ == "__main__":

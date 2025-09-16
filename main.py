@@ -13,16 +13,17 @@ from hidden_links import get_all_links
 import time
 from playwright.async_api import Error as PWError
 # ---------- config (keep params in code) ----------
-DOMAIN = "interviewing.io"
+DOMAIN = "quill.co"
 START_PATH = f"{DOMAIN}"
 LIMIT = 1000
-CONCURRENCY = 50
+CONCURRENCY = 5
 HEADLESS = True
 VERBOSE = True
+QUICK_MODE = True
 
 # Only URLs whose path starts with any of these prefixes will be crawled/saved.
 # Examples: ["/blog", "/blog/science"]. Leave [] to allow everything on the domain.
-ALLOWED_PATH_PREFIXES = ["/mocks"]
+ALLOWED_PATH_PREFIXES = []
 
 # Cap how many candidate elements we try to click per page when probing JS-only nav
 MAX_CLICK_PROBES_PER_PAGE = 30
@@ -343,14 +344,16 @@ async def scrape_one_page(context, url: str, domain: str, allowed_prefixes: list
         # ---- discover links
         static_links = await collect_static_links(page, domain)
         inline_click_urls = await collect_inline_click_urls(page)
-        hidden_links = await get_all_links(
-            url=url,
-            max_clicks=120,
-            click_wait_ms=200,
-            same_domain_only=True,
-            headless=True,
-            scroll_steps=12
-        )
+        hidden_links = set()
+        if not QUICK_MODE:
+            hidden_links = await get_all_links(
+                url=url,
+                max_clicks=120,
+                click_wait_ms=200,
+                same_domain_only=True,
+                headless=True,
+                scroll_steps=12
+            )
 
         # click_only_urls = await probe_click_only_links(
         #     page, domain=domain, max_clicks=MAX_CLICK_PROBES_PER_PAGE, wait_ms=CLICK_WAIT_MS
@@ -408,7 +411,7 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=HEADLESS)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (compatible; MyCrawler/1.0; +https://example.com/bot)"
+            user_agent="Mozilla/5.0 (compatible; OpenAII/1.0; +https://example.com/bot)"
         )
         # Install nav hooks for all pages BEFORE any page script runs
         await context.add_init_script(NAV_INJECT_JS)
@@ -444,7 +447,7 @@ async def crawl_domain(domain: str, limit: int = 50, concurrency: int = 5, allow
                         for lnk in links:
                             if len(visited) >= limit:
                                 break
-                            if lnk not in visited and lnk not in enqueued and path_allowed(u, allowed_prefixes):
+                            if lnk not in visited and lnk not in enqueued and path_allowed(lnk, allowed_prefixes):
                                 enqueued.add(lnk)
                                 to_add.append(lnk)
 
