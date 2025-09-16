@@ -20,21 +20,6 @@ Results are stored in `output/<domain>/`:
 - `pages.ndjson` – newline-delimited JSON  
 - `pages.json` – rolling snapshot  
 
-## 🚀 Quick Start
-```bash
-pip install -r requirements.txt
-python -m playwright install
-python server.py
-
-# requirements.txt
-flask
-html2text
-python-usp
-playwright
-playwright-stealth
-
----
-
 # Web Crawler – Flask UI + REST API (port 5000)
 
 ![App UI](https://github.com/user-attachments/assets/312e3b1b-c1aa-4097-ab48-2b40b68f06d1)
